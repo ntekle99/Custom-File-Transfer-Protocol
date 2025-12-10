@@ -4,6 +4,103 @@ Our file transfer system is built on a **custom UDP-based reliable transport pro
 
 ---
 
+## High-Level Design Overview
+
+### Design Philosophy
+A UDP-based reliable file transfer protocol using **NACK-based retransmission**. The system uses multi-threading to parallelize sending, receiving, and retransmission operations, achieving high throughput even under adverse network conditions.
+
+### System Architecture
+
+```
+┌─────────────────┐                    ┌─────────────────┐
+│     CLIENT      │                    │     SERVER      │
+│   (Sender)      │                    │   (Receiver)    │
+└─────────────────┘                    └─────────────────┘
+         │                                       │
+         │  UDP Packets (fire-and-forget)       │
+         ├──────────────────────────────────────>│
+         │                                       │
+         │  NACK Packets (missing packets)      │
+         │<─────────────────────────────────────┤
+         │                                       │
+         │  Retransmitted Packets               │
+         ├──────────────────────────────────────>│
+         │                                       │
+         │  Completion Signal (NACK -1)         │
+         │<─────────────────────────────────────┤
+```
+
+### Protocol Flow
+
+**Phase 1: Initial Transmission**
+- Client preloads file → splits into packets → loads into stack
+- Client sender thread sends all packets rapidly via UDP
+- Server receiver thread receives packets, detects gaps, enqueues missing packets
+
+**Phase 2: Retransmission**
+- Server sender thread detects expired missing packets (>400ms) → sends NACK
+- Client NACK thread receives NACK → pushes packet back onto stack
+- Client sender thread retransmits requested packet
+- Server receiver thread receives retransmission → removes from queue
+
+**Phase 3: Completion**
+- Server: All packets received + queue empty → sends completion signal (NACK -1)
+- Client: Receives completion → stops threads → calculates throughput
+- Server: Writes file → computes MD5 → verifies integrity
+
+### Key Design Decisions
+
+1. **NACK-Based (Not ACK-Based)**
+   - Only requests missing packets, reducing bandwidth overhead
+   - More efficient than ACK-based protocols in high-loss scenarios
+
+2. **Multi-Threading**
+   - Parallel sending and receiving operations
+   - Overlaps transmission with retransmission handling
+   - Maximizes throughput
+
+3. **Preloading**
+   - All packets loaded into memory before transfer
+   - Enables fast retransmission (no disk I/O during transfer)
+   - Trade-off: higher memory usage
+
+4. **Out-of-Order Handling**
+   - Server accepts packets in any order
+   - Reassembly map enables correct ordering
+   - Handles network reordering gracefully
+
+5. **Timeout-Based NACK**
+   - Waits 2×RTT before requesting retransmission
+   - Allows late packets to arrive naturally
+   - Reduces unnecessary retransmissions
+
+6. **Thread-Safe Data Structures**
+   - Mutexes protect all shared state
+   - Prevents race conditions
+   - Ensures data integrity
+
+### Performance Characteristics
+
+- **Throughput**: High (UDP bulk transmission)
+- **Reliability**: High (NACK-based retransmission)
+- **Latency Tolerance**: Good (handles high RTT)
+- **Memory Usage**: High (preloads entire file)
+- **Bandwidth Efficiency**: Good (only requests missing packets)
+
+### Trade-offs
+
+| Aspect | Benefit | Cost |
+|--------|---------|------|
+| UDP | Fast, no connection overhead | No built-in reliability |
+| Preloading | Fast retransmission | High memory usage |
+| NACK-based | Bandwidth efficient | More complex than ACK |
+| Multi-threading | Parallel operations | Synchronization overhead |
+| Out-of-order | Handles network reordering | Requires reassembly buffer |
+
+---
+
+---
+
 ## Client Side (Sender)
 
 ### Preload and Segmentation
